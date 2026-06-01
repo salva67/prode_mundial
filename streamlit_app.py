@@ -366,38 +366,29 @@ def page_admin():
 
     # ── Sincronización automática ──────────────────────────────────────────────
     st.subheader("🔄 Sincronización automática de resultados")
-
-    api_key = st.secrets.get("WC_API_KEY", "") if hasattr(st, "secrets") else ""
-    if not api_key:
-        st.info(
-            "Para activar la sincronización automática, agregá tu API key de "
-            "[wc2026api.com](https://www.wc2026api.com) en los **Secrets** de Streamlit Cloud:\n\n"
-            "```toml\nWC_API_KEY = \"tu_api_key_aqui\"\n```\n\n"
-            "El plan gratuito incluye 100 requests/día — suficiente para el Mundial."
-        )
-    else:
-        col1, col2 = st.columns([2, 1])
-        col1.markdown(
-            "Trae todos los resultados finalizados de la API y actualiza los puntos automáticamente."
-        )
-        if col2.button("🔄 Sincronizar ahora", use_container_width=True, type="primary"):
-            with st.spinner("Consultando API..."):
-                result = sync_results(api_key, db)
-            if not result["ok"]:
-                st.error(f"❌ Error: {result['error']}")
-            else:
-                st.success(
-                    f"✅ Sincronización completa — "
-                    f"**{result['updated']}** partidos actualizados, "
-                    f"{result['skipped']} sin cambios."
+    col1, col2 = st.columns([2, 1])
+    col1.markdown(
+        "Trae los resultados de los últimos 10 días desde **ESPN** (sin API key) "
+        "y actualiza los puntos de todos los participantes automáticamente."
+    )
+    if col2.button("🔄 Sincronizar ahora", use_container_width=True, type="primary"):
+        with st.spinner("Consultando ESPN..."):
+            result = sync_results(None, db)
+        if not result["ok"]:
+            st.error(f"❌ {result['error']}")
+        else:
+            st.success(
+                f"✅ Listo — **{result['updated']}** partido(s) actualizado(s), "
+                f"{result['skipped']} ya estaban cargados."
+            )
+            if result["not_found"]:
+                st.warning(
+                    f"⚠️ {len(result['not_found'])} partido(s) de ESPN no coincidieron con la DB "
+                    f"(pueden ser de otras competencias): "
+                    + ", ".join(result["not_found"][:5])
                 )
-                if result["not_found"]:
-                    st.warning(
-                        f"⚠️ {len(result['not_found'])} partido(s) no encontrados en la DB: "
-                        + ", ".join(result["not_found"][:5])
-                    )
-                if result["updated"] > 0:
-                    st.rerun()
+            if result["updated"] > 0:
+                st.rerun()
 
     st.divider()
 
