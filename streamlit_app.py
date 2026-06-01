@@ -1,6 +1,7 @@
 import streamlit as st
 from models import engine, SessionLocal, User, Match, Prediction, init_db
 from data.fixtures import GROUP_MATCHES, GROUPS, KNOCKOUT_ROUNDS, KNOCKOUT_SLOTS
+from sync import sync_results
 
 ADMIN_PASSWORD = "admin2026"
 
@@ -362,6 +363,43 @@ def page_admin():
 
     db = get_db()
     st.success("✅ Sesión de admin activa.")
+
+    # ── Sincronización automática ──────────────────────────────────────────────
+    st.subheader("🔄 Sincronización automática de resultados")
+
+    api_key = st.secrets.get("WC_API_KEY", "") if hasattr(st, "secrets") else ""
+    if not api_key:
+        st.info(
+            "Para activar la sincronización automática, agregá tu API key de "
+            "[wc2026api.com](https://www.wc2026api.com) en los **Secrets** de Streamlit Cloud:\n\n"
+            "```toml\nWC_API_KEY = \"tu_api_key_aqui\"\n```\n\n"
+            "El plan gratuito incluye 100 requests/día — suficiente para el Mundial."
+        )
+    else:
+        col1, col2 = st.columns([2, 1])
+        col1.markdown(
+            "Trae todos los resultados finalizados de la API y actualiza los puntos automáticamente."
+        )
+        if col2.button("🔄 Sincronizar ahora", use_container_width=True, type="primary"):
+            with st.spinner("Consultando API..."):
+                result = sync_results(api_key, db)
+            if not result["ok"]:
+                st.error(f"❌ Error: {result['error']}")
+            else:
+                st.success(
+                    f"✅ Sincronización completa — "
+                    f"**{result['updated']}** partidos actualizados, "
+                    f"{result['skipped']} sin cambios."
+                )
+                if result["not_found"]:
+                    st.warning(
+                        f"⚠️ {len(result['not_found'])} partido(s) no encontrados en la DB: "
+                        + ", ".join(result["not_found"][:5])
+                    )
+                if result["updated"] > 0:
+                    st.rerun()
+
+    st.divider()
 
     stage_opts = ["Grupos"] + KNOCKOUT_ROUNDS
     stage = st.selectbox("Etapa", stage_opts)
