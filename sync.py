@@ -1,15 +1,17 @@
 """
-Sincronización automática de resultados desde la API de wc2026api.com
-Documentación: https://www.wc2026api.com
+Sincronización automática de resultados desde la API pública de ESPN.
+No requiere API key ni registro.
+Endpoint: https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard
 """
 
 import urllib.request
 import urllib.error
 import json
+from datetime import datetime, timedelta, timezone
 
-API_BASE = "https://api.wc2026api.com"
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
 
-# Mapeo de nombres en inglés (API) → español (nuestra DB)
+# Mapeo nombres ESPN (inglés) → nuestra DB (español)
 TEAM_NAME_MAP = {
     "Mexico": "México",
     "South Africa": "Sudáfrica",
@@ -20,7 +22,6 @@ TEAM_NAME_MAP = {
     "Canada": "Canadá",
     "Bosnia and Herzegovina": "Bosnia y Herzegovina",
     "Bosnia & Herzegovina": "Bosnia y Herzegovina",
-    "Qatar": "Qatar",
     "Switzerland": "Suiza",
     "Brazil": "Brasil",
     "Morocco": "Marruecos",
@@ -28,9 +29,6 @@ TEAM_NAME_MAP = {
     "Scotland": "Escocia",
     "United States": "Estados Unidos",
     "USA": "Estados Unidos",
-    "US": "Estados Unidos",
-    "Paraguay": "Paraguay",
-    "Australia": "Australia",
     "Turkey": "Turquía",
     "Türkiye": "Turquía",
     "Germany": "Alemania",
@@ -38,144 +36,80 @@ TEAM_NAME_MAP = {
     "Curaçao": "Curazao",
     "Ivory Coast": "Costa de Marfil",
     "Côte d'Ivoire": "Costa de Marfil",
-    "Ecuador": "Ecuador",
     "Netherlands": "Países Bajos",
     "Japan": "Japón",
     "Sweden": "Suecia",
     "Tunisia": "Túnez",
     "Belgium": "Bélgica",
-    "Egypt": "Egipto",
     "Iran": "Irán",
     "New Zealand": "Nueva Zelanda",
     "Spain": "España",
     "Cape Verde": "Cabo Verde",
     "Saudi Arabia": "Arabia Saudita",
-    "Uruguay": "Uruguay",
     "France": "Francia",
-    "Senegal": "Senegal",
-    "Iraq": "Iraq",
     "Norway": "Noruega",
-    "Argentina": "Argentina",
     "Algeria": "Argelia",
-    "Austria": "Austria",
     "Jordan": "Jordania",
     "Portugal": "Portugal",
     "DR Congo": "RD Congo",
     "Congo DR": "RD Congo",
     "Democratic Republic of Congo": "RD Congo",
     "Uzbekistan": "Uzbekistán",
-    "Colombia": "Colombia",
     "England": "Inglaterra",
     "Croatia": "Croacia",
-    "Ghana": "Ghana",
     "Panama": "Panamá",
+    # Ya iguales en ambos: Argentina, Colombia, Uruguay, Qatar, Paraguay,
+    # Australia, Ecuador, Senegal, Iraq, Austria, Ghana, Egypt, Belgium...
 }
 
 
 def normalize(name: str) -> str:
-    """Convierte nombre inglés de la API a español de nuestra DB."""
     return TEAM_NAME_MAP.get(name, name)
 
 
-def extract_score(match: dict):
-    """
-    Extrae goles del dict de la API. Prueba distintos schemas posibles
-    ya que la documentación no detalla el campo exacto para partidos terminados.
-    Retorna (home_goals, away_goals) o None si no hay resultado todavía.
-    """
-    # Intentar distintas estructuras comunes de APIs de fútbol
-    candidates = [
-        # wc2026api probable
-        (match.get("home_score"), match.get("away_score")),
-        (match.get("homeScore"), match.get("awayScore")),
-        (match.get("home_goals"), match.get("away_goals")),
-        # objeto anidado
-        (
-            match.get("score", {}).get("home") if isinstance(match.get("score"), dict) else None,
-            match.get("score", {}).get("away") if isinstance(match.get("score"), dict) else None,
-        ),
-        (
-            match.get("goals", {}).get("home") if isinstance(match.get("goals"), dict) else None,
-            match.get("goals", {}).get("away") if isinstance(match.get("goals"), dict) else None,
-        ),
-        (
-            match.get("result", {}).get("home") if isinstance(match.get("result"), dict) else None,
-            match.get("result", {}).get("away") if isinstance(match.get("result"), dict) else None,
-        ),
-    ]
-    for h, a in candidates:
-        if h is not None and a is not None:
-            try:
-                return int(h), int(a)
-            except (ValueError, TypeError):
-                continue
-    return None
+def fetch_day(date_str: str) -> list:
+    """Trae los partidos de un día específico (formato YYYYMMDD)."""
+    url = f"{ESPN_BASE}?dates={date_str}&limit=20"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("events", [])
+    except Exception:
+        return []
 
 
-def fetch_finished_matches(api_key: str) -> tuple[list, str | None]:
-    """
-    Llama a la API y devuelve (lista_de_partidos_terminados, mensaje_error).
-    """
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-    }
-
-    # Intentar con parámetro status=finished primero, luego sin filtro
-    urls = [
-        f"{API_BASE}/matches?status=finished",
-        f"{API_BASE}/matches?phase=FT",        # Full Time, a veces usado
-        f"{API_BASE}/matches",                  # Traer todo y filtrar localmente
-    ]
-
-    last_error = None
-    for url in urls:
+def parse_finished_matches(events: list) -> list:
+    """Extrae partidos terminados de la respuesta de ESPN."""
+    results = []
+    for event in events:
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-                # La API puede devolver lista directa o {matches: [...]} o {data: [...]}
-                if isinstance(data, list):
-                    matches = data
-                elif isinstance(data, dict):
-                    matches = data.get("matches") or data.get("data") or data.get("results") or []
-                else:
-                    matches = []
+            status = event["status"]["type"]
+            if not status.get("completed", False):
+                continue
 
-                # Filtrar solo los terminados si no vino filtrado
-                finished = []
-                for m in matches:
-                    status = (m.get("status") or m.get("phase") or "").lower()
-                    if status in ("finished", "ft", "completed", "full_time", "fulltime", "played", "done"):
-                        finished.append(m)
-                    elif extract_score(m) is not None:
-                        # Si tiene score aunque el status sea raro, incluirlo
-                        finished.append(m)
+            competition = event["competitions"][0]
+            competitors = competition["competitors"]
 
-                return finished, None
+            home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+            away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
 
-        except urllib.error.HTTPError as e:
-            last_error = f"HTTP {e.code}: {e.reason}"
-            if e.code == 401:
-                return [], "API key inválida o sin permisos."
-            if e.code == 429:
-                return [], "Límite de requests diarios alcanzado (100/día en plan gratuito)."
-            # 404 puede significar que el endpoint no existe, probar el siguiente
+            results.append({
+                "home_team": normalize(home["team"]["displayName"]),
+                "away_team": normalize(away["team"]["displayName"]),
+                "home_score": int(float(home.get("score", 0))),
+                "away_score": int(float(away.get("score", 0))),
+            })
+        except (KeyError, ValueError, IndexError):
             continue
-        except urllib.error.URLError as e:
-            last_error = f"Error de conexión: {e.reason}"
-            continue
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    return [], last_error or "No se pudo conectar a la API."
+    return results
 
 
 def sync_results(api_key: str, db) -> dict:
     """
-    Sincroniza resultados de la API con la base de datos local.
-    Retorna un dict con estadísticas del proceso.
+    Sincroniza resultados con la base de datos.
+    api_key se ignora — ESPN no requiere autenticación.
+    Busca resultados de los últimos 10 días + hoy.
     """
     from models import Match, Prediction
 
@@ -185,57 +119,49 @@ def sync_results(api_key: str, db) -> dict:
         def res(h, a): return "L" if h > a else ("V" if h < a else "E")
         return 1 if res(ph, pa) == res(rh, ra) else 0
 
-    api_matches, error = fetch_finished_matches(api_key)
-    if error:
-        return {"ok": False, "error": error}
+    # Buscar en los últimos 10 días para no perder ningún partido
+    today = datetime.now(timezone.utc)
+    all_finished = []
+    for days_back in range(0, 11):
+        day = today - timedelta(days=days_back)
+        date_str = day.strftime("%Y%m%d")
+        events = fetch_day(date_str)
+        all_finished.extend(parse_finished_matches(events))
+
+    if not all_finished:
+        return {"ok": False, "error": "No se pudo conectar a ESPN o no hay partidos terminados aún."}
 
     updated = 0
     skipped = 0
     not_found = []
 
-    for am in api_matches:
-        score = extract_score(am)
-        if score is None:
-            skipped += 1
-            continue
+    for am in all_finished:
+        home_name = am["home_team"]
+        away_name = am["away_team"]
+        home_goal = am["home_score"]
+        away_goal = am["away_score"]
 
-        home_goal, away_goal = score
-        home_api = normalize(am.get("home_team", ""))
-        away_api = normalize(am.get("away_team", ""))
-
-        if not home_api or not away_api:
-            skipped += 1
-            continue
-
-        # Buscar partido en nuestra DB (por nombre de equipos)
-        match = (
-            db.query(Match)
-            .filter_by(home_team=home_api, away_team=away_api)
-            .first()
-        )
+        match = db.query(Match).filter_by(home_team=home_name, away_team=away_name).first()
         if not match:
-            # Buscar también al revés (a veces la API invierte local/visitante)
-            match = (
-                db.query(Match)
-                .filter_by(home_team=away_api, away_team=home_api)
-                .first()
-            )
+            # Intentar orden invertido
+            match = db.query(Match).filter_by(home_team=away_name, away_team=home_name).first()
             if match:
-                home_goal, away_goal = away_goal, home_goal  # ajustar sentido
+                home_goal, away_goal = away_goal, home_goal
 
         if not match:
-            not_found.append(f"{home_api} vs {away_api}")
+            not_found.append(f"{home_name} vs {away_name}")
             continue
 
-        if match.status == "jugado" and match.home_score == home_goal and match.away_score == away_goal:
+        if (match.status == "jugado"
+                and match.home_score == home_goal
+                and match.away_score == away_goal):
             skipped += 1
-            continue  # Ya estaba cargado con mismo resultado
+            continue
 
         match.home_score = home_goal
         match.away_score = away_goal
         match.status = "jugado"
 
-        # Recalcular puntos de todos los pronósticos de este partido
         for pred in match.predictions:
             pred.points = compute_pts(pred.home_score, pred.away_score, home_goal, away_goal)
 
@@ -245,7 +171,7 @@ def sync_results(api_key: str, db) -> dict:
 
     return {
         "ok": True,
-        "total_api": len(api_matches),
+        "total_api": len(all_finished),
         "updated": updated,
         "skipped": skipped,
         "not_found": not_found,
