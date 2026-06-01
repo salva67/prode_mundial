@@ -298,6 +298,234 @@ def page_bracket():
     db.close()
 
 
+# ── Estadísticas del Mundial ──────────────────────────────────────────────────
+
+def compute_group_standings(db):
+    """Calcula la tabla de posiciones de cada grupo a partir de los partidos jugados."""
+    standings = {}
+    for group_name, teams in GROUPS.items():
+        table = {t: {"PJ": 0, "G": 0, "E": 0, "P": 0, "GF": 0, "GC": 0, "DG": 0, "Pts": 0} for t in teams}
+        matches = db.query(Match).filter_by(stage="Grupos", group=group_name, status="jugado").all()
+        for m in matches:
+            h, a = m.home_score, m.away_score
+            ht, at = m.home_team, m.away_team
+            if ht not in table or at not in table:
+                continue
+            table[ht]["PJ"] += 1; table[at]["PJ"] += 1
+            table[ht]["GF"] += h; table[ht]["GC"] += a
+            table[at]["GF"] += a; table[at]["GC"] += h
+            if h > a:
+                table[ht]["G"] += 1; table[ht]["Pts"] += 3
+                table[at]["P"] += 1
+            elif h < a:
+                table[at]["G"] += 1; table[at]["Pts"] += 3
+                table[ht]["P"] += 1
+            else:
+                table[ht]["E"] += 1; table[ht]["Pts"] += 1
+                table[at]["E"] += 1; table[at]["Pts"] += 1
+        for t in table:
+            table[t]["DG"] = table[t]["GF"] - table[t]["GC"]
+        sorted_teams = sorted(
+            table.items(),
+            key=lambda x: (-x[1]["Pts"], -x[1]["DG"], -x[1]["GF"], x[0])
+        )
+        standings[group_name] = sorted_teams
+    return standings
+
+
+def page_mundial_stats():
+    db = get_db()
+    st.title("🌍 Estadísticas del Mundial")
+
+    played_matches = db.query(Match).filter_by(status="jugado").all()
+    total_played = len(played_matches)
+    group_played = [m for m in played_matches if m.stage == "Grupos"]
+    ko_played = [m for m in played_matches if m.stage != "Grupos"]
+
+    # ── Métricas generales ────────────────────────────────────────────────────
+    total_goals = sum((m.home_score or 0) + (m.away_score or 0) for m in played_matches)
+    avg_goals = round(total_goals / total_played, 2) if total_played else 0
+    total_group_matches = db.query(Match).filter_by(stage="Grupos").count()
+    total_ko_matches = sum(KNOCKOUT_SLOTS.values())
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Partidos jugados", f"{total_played} / {total_group_matches + total_ko_matches}")
+    c2.metric("Goles totales", total_goals)
+    c3.metric("Promedio goles/partido", avg_goals)
+    c4.metric("Partidos de grupos", len(group_played))
+    c5.metric("Partidos eliminatorios", len(ko_played))
+
+    if not played_matches:
+        st.info("⏳ El torneo aún no comenzó. Las estadísticas se actualizarán al iniciarse los partidos.")
+        db.close()
+        return
+
+    st.divider()
+
+    # ── Tabs principales ──────────────────────────────────────────────────────
+    tab_groups, tab_results, tab_teams, tab_records = st.tabs([
+        "🏟️ Tabla de grupos",
+        "📋 Resultados",
+        "⚽ Equipos",
+        "🏅 Récords",
+    ])
+
+    # ── Tabla de grupos ───────────────────────────────────────────────────────
+    with tab_groups:
+        standings = compute_group_standings(db)
+        group_names = sorted(GROUPS.keys())
+
+        # Mostrar de a 3 grupos por fila
+        for i in range(0, len(group_names), 3):
+            cols = st.columns(3)
+            for col, gname in zip(cols, group_names[i:i+3]):
+                with col:
+                    st.markdown(f"#### Grupo {gname}")
+                    rows = standings[gname]
+                    # Header
+                    h = st.columns([4, 1, 1, 1, 1, 1, 1, 1])
+                    for hcol, label in zip(h, ["Equipo","PJ","G","E","P","GF","GC","Pts"]):
+                        hcol.markdown(f"<small><b>{label}</b></small>", unsafe_allow_html=True)
+
+                    for pos, (team, s) in enumerate(rows):
+                        r = st.columns([4, 1, 1, 1, 1, 1, 1, 1])
+                        # Color: verde top 2, amarillo 3ro, rojo 4to
+                        if pos < 2:
+                            color = "#22c55e"
+                            prefix = "🟢 "
+                        elif pos == 2:
+                            color = "#eab308"
+                            prefix = "🟡 "
+                        else:
+                            color = "#ef4444"
+                            prefix = "🔴 "
+                        r[0].markdown(
+                            f"<span style='color:{color};font-size:0.85rem'>{prefix}{team}</span>",
+                            unsafe_allow_html=True
+                        )
+                        for rcol, val in zip(r[1:], [s["PJ"],s["G"],s["E"],s["P"],s["GF"],s["GC"],s["Pts"]]):
+                            weight = "bold" if rcol == r[7] else "normal"
+                            rcol.markdown(f"<span style='font-size:0.85rem;font-weight:{weight}'>{val}</span>", unsafe_allow_html=True)
+                    st.markdown("")
+
+        st.caption("🟢 Clasificado · 🟡 Posible repechaje · 🔴 Eliminado (proyección según resultados actuales)")
+
+    # ── Resultados ────────────────────────────────────────────────────────────
+    with tab_results:
+        stage_filter = st.selectbox("Filtrar por etapa", ["Todos"] + ["Grupos"] + KNOCKOUT_ROUNDS)
+        group_filter = st.selectbox("Filtrar por grupo", ["Todos"] + sorted(GROUPS.keys())) if stage_filter in ("Todos", "Grupos") else None
+
+        filtered = played_matches
+        if stage_filter != "Todos":
+            filtered = [m for m in filtered if m.stage == stage_filter]
+        if group_filter and group_filter != "Todos":
+            filtered = [m for m in filtered if m.group == group_filter]
+
+        if not filtered:
+            st.info("No hay partidos jugados con ese filtro.")
+        else:
+            for m in filtered:
+                total_m = (m.home_score or 0) + (m.away_score or 0)
+                badge = "🔥" if total_m >= 5 else ""
+                label = f"Gr.{m.group}" if m.group else m.stage
+                cols = st.columns([1, 3, 2, 3, 1])
+                cols[0].caption(label)
+                cols[1].markdown(f"<div style='text-align:right'>{m.home_team}</div>", unsafe_allow_html=True)
+                cols[2].markdown(
+                    f"<div style='text-align:center;font-weight:bold;font-size:1.1rem'>"
+                    f"{m.home_score} - {m.away_score}</div>",
+                    unsafe_allow_html=True
+                )
+                cols[3].markdown(m.away_team)
+                cols[4].markdown(badge)
+
+    # ── Estadísticas por equipo ───────────────────────────────────────────────
+    with tab_teams:
+        team_stats = {}
+        for m in group_played:
+            for team, gf, gc in [(m.home_team, m.home_score, m.away_score),
+                                  (m.away_team, m.away_score, m.home_score)]:
+                if team not in team_stats:
+                    team_stats[team] = {"PJ":0,"G":0,"E":0,"P":0,"GF":0,"GC":0,"Pts":0}
+                s = team_stats[team]
+                s["PJ"] += 1; s["GF"] += gf; s["GC"] += gc
+                if gf > gc: s["G"] += 1; s["Pts"] += 3
+                elif gf == gc: s["E"] += 1; s["Pts"] += 1
+                else: s["P"] += 1
+        for s in team_stats.values():
+            s["DG"] = s["GF"] - s["GC"]
+
+        if not team_stats:
+            st.info("Sin datos aún.")
+        else:
+            sort_by = st.selectbox("Ordenar por", ["Pts", "GF", "DG", "G"])
+            sorted_teams = sorted(team_stats.items(), key=lambda x: -x[1][sort_by])
+
+            header = st.columns([3,1,1,1,1,1,1,1,1])
+            for hc, lbl in zip(header, ["Equipo","PJ","G","E","P","GF","GC","DG","Pts"]):
+                hc.markdown(f"**{lbl}**")
+            st.divider()
+            for team, s in sorted_teams:
+                row = st.columns([3,1,1,1,1,1,1,1,1])
+                row[0].markdown(team)
+                for rc, v in zip(row[1:], [s["PJ"],s["G"],s["E"],s["P"],s["GF"],s["GC"],s["DG"],s["Pts"]]):
+                    rc.markdown(str(v))
+
+    # ── Récords del torneo ────────────────────────────────────────────────────
+    with tab_records:
+        if not group_played:
+            st.info("Sin datos aún.")
+        else:
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("#### 🔥 Partido con más goles")
+                top_match = max(group_played, key=lambda m: (m.home_score or 0) + (m.away_score or 0))
+                total = (top_match.home_score or 0) + (top_match.away_score or 0)
+                st.metric(
+                    f"{top_match.home_team} vs {top_match.away_team}",
+                    f"{top_match.home_score} - {top_match.away_score}",
+                    f"{total} goles"
+                )
+
+                st.markdown("#### ⚽ Mayor goleada")
+                top_diff = max(group_played, key=lambda m: abs((m.home_score or 0) - (m.away_score or 0)))
+                diff = abs((top_diff.home_score or 0) - (top_diff.away_score or 0))
+                st.metric(
+                    f"{top_diff.home_team} vs {top_diff.away_team}",
+                    f"{top_diff.home_score} - {top_diff.away_score}",
+                    f"Diferencia: {diff}"
+                )
+
+                st.markdown("#### 🤝 Empates")
+                draws = [m for m in group_played if m.home_score == m.away_score]
+                st.metric("Total de empates", len(draws))
+
+            with col2:
+                if team_stats:
+                    st.markdown("#### 🏹 Mejor ataque")
+                    best_attack = max(team_stats.items(), key=lambda x: x[1]["GF"])
+                    st.metric(best_attack[0], f"{best_attack[1]['GF']} goles a favor")
+
+                    st.markdown("#### 🛡️ Mejor defensa")
+                    best_defense = min(
+                        [(t, s) for t, s in team_stats.items() if s["PJ"] > 0],
+                        key=lambda x: (x[1]["GC"], -x[1]["PJ"])
+                    )
+                    st.metric(best_defense[0], f"{best_defense[1]['GC']} goles en contra")
+
+                    st.markdown("#### 📈 Más goleador")
+                    top_scorer_team = max(team_stats.items(), key=lambda x: x[1]["GF"])
+                    avg = round(top_scorer_team[1]["GF"] / max(top_scorer_team[1]["PJ"], 1), 1)
+                    st.metric(top_scorer_team[0], f"{avg} goles/partido en promedio")
+
+                    st.markdown("#### 🔴 Más derrotas")
+                    worst = max(team_stats.items(), key=lambda x: x[1]["P"])
+                    st.metric(worst[0], f"{worst[1]['P']} derrota(s)")
+
+    db.close()
+
+
 # ── Tabla ─────────────────────────────────────────────────────────────────────
 
 def page_leaderboard():
@@ -463,12 +691,12 @@ def main():
         st.markdown(f"### 🏆 Prode Mundial 2026")
         st.markdown(f"👤 **{st.session_state['user_name']}**")
         st.divider()
-        pages = ["Dashboard", "Pronósticos", "Eliminatorias", "Tabla"]
+        pages = ["Dashboard", "Pronósticos", "Eliminatorias", "Tabla", "Mundial 🌍"]
         if st.session_state.get("is_admin"):
             pages.append("Admin ⚙️")
         else:
             pages.append("Admin")
-        icons = {"Dashboard": "🏠", "Pronósticos": "✏️", "Eliminatorias": "🗂️", "Tabla": "📊", "Admin": "⚙️", "Admin ⚙️": "⚙️"}
+        icons = {"Dashboard": "🏠", "Pronósticos": "✏️", "Eliminatorias": "🗂️", "Tabla": "📊", "Mundial 🌍": "🌍", "Admin": "⚙️", "Admin ⚙️": "⚙️"}
         if "page" not in st.session_state:
             st.session_state["page"] = "Dashboard"
         for p in pages:
@@ -490,6 +718,8 @@ def main():
         page_bracket()
     elif page == "Tabla":
         page_leaderboard()
+    elif page == "Mundial 🌍":
+        page_mundial_stats()
     elif page in ("Admin", "Admin ⚙️"):
         page_admin()
 
